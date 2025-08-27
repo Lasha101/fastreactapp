@@ -6,7 +6,6 @@ venv/
 *.pyc
 google-credentials.json
 travel_app.db
-requirements.txt
 alembic.ini
 
 # Frontend (JavaScript)
