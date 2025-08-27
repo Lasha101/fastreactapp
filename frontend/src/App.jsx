@@ -789,7 +789,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 
-const API_URL = 'http://127.0.0.1:8000';
+const API_URL = '/api';
 
 // --- STYLES COMPONENT (Integrated) ---
 const GlobalStyles = () => (
