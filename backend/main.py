@@ -18,6 +18,11 @@ import ocr_service # Import the new service
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+import os
+from dotenv import load_dotenv # You'll need to install this library
+
+# Load environment variables from a .env file (for local development)
+load_dotenv()
 
 # Create all database tables
 models.Base.metadata.create_all(bind=engine)
@@ -33,16 +38,22 @@ async def lifespan(app: FastAPI):
     # Check if admin user exists and create one if not
     admin_user = crud.get_user_by_username(db, username="admin")
     if not admin_user:
-        admin = schemas.UserCreate(
-            first_name="Admin",
-            last_name="User",
-            email="admin@example.com",
-            phone_number="1234567890",
-            user_name="admin",
-            password="adminpassword" # Default admin password
-        )
-        # Admin is created without an invitation token
-        crud.create_user(db=db, user=admin, role="admin", token=None) 
+        # Get the admin password from an environment variable
+        ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+        if not ADMIN_PASSWORD:
+            # Handle the case where the password isn't set, maybe log a warning
+            print("WARNING: ADMIN_PASSWORD environment variable not set. Admin user not created.")
+        else:
+            admin = schemas.UserCreate(
+                first_name="Admin",
+                last_name="User",
+                email="admin@example.com",
+                phone_number="1234567890",
+                user_name="admin",
+                password=ADMIN_PASSWORD # Use the variable here
+            )
+            # Admin is created without an invitation token
+            crud.create_user(db=db, user=admin, role="admin", token=None)
     db.close()
     yield
     # Code to run on shutdown (if any)

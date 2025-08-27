@@ -7,6 +7,7 @@ venv/
 google-credentials.json
 travel_app.db
 alembic.ini
+.env
 
 # Frontend (JavaScript)
 node_modules/

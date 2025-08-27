@@ -9,8 +9,13 @@ from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 import crud, models, schemas
 from database import get_db
+import os
+from dotenv import load_dotenv # You'll need to install this library
 
-SECRET_KEY = "YOUR_SUPER_SECRET_KEY"
+# Load environment variables from a .env file (for local development)
+load_dotenv()
+
+SECRET_KEY = os.getenv("SECRET_KEY", "a_default_fallback_key_if_not_set")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__ident="2b")
