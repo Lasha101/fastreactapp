@@ -1,6 +1,10 @@
 import os
 import pandas as pd
 from contextlib import asynccontextmanager
+import tempfile
+import os
+from fastapi import BackgroundTasks
+from pydantic import ValidationError
 # --> IMPORT Request
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Query, Form, Request 
 from fastapi.middleware.cors import CORSMiddleware
@@ -183,46 +187,114 @@ def create_user_by_admin(user: schemas.UserCreate, db: Session = Depends(get_db)
 def create_passport(passport: schemas.PassportCreate, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_active_user)):
     return crud.create_user_passport(db=db, passport=passport, user_id=current_user.id)
 
-# /passports/upload-and-extract/ endpoint
+# # /passports/upload-and-extract/ endpoint
+# @app.post("/passports/upload-and-extract/", response_model=schemas.OcrUploadResponse)
+# async def upload_and_extract_passport(
+#     destination: Optional[str] = Form(None),
+#     file: UploadFile = File(...),
+#     db: Session = Depends(get_db),
+#     current_user: models.User = Depends(auth.get_current_active_user)
+# ):
+#     """
+#     Receives a passport image or a single/multi-page PDF, extracts data from
+#     each page, and creates new passport records for each successful extraction.
+#     Returns a summary of successful and failed pages.
+#     """
+#     contents = await file.read()
+    
+#     extraction_results = ocr_service.extract_passport_data(
+#         file_content=contents,
+#         content_type=file.content_type
+#     )
+
+#     successes = []
+#     failures = []
+
+#     for result in extraction_results:
+#         page_number = result.get("page_number")
+#         if "data" in result:
+#             passport_data = result["data"]
+            
+#             if destination:
+#                 passport_data["destination"] = destination
+            
+#             passport_create_schema = schemas.PassportCreate(**passport_data)
+#             try:
+#                 created_passport = crud.create_user_passport(db=db, passport=passport_create_schema, user_id=current_user.id)
+#                 successes.append(created_passport)
+#             except HTTPException as e:
+#                 failures.append({"page_number": page_number, "detail": e.detail})
+#         elif "error" in result:
+#             failures.append({"page_number": page_number, "detail": result["error"]})
+
+#     return {"successes": successes, "failures": failures}
+
+
+
+
+
 @app.post("/passports/upload-and-extract/", response_model=schemas.OcrUploadResponse)
 async def upload_and_extract_passport(
+    background_tasks: BackgroundTasks,
     destination: Optional[str] = Form(None),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_active_user)
 ):
-    """
-    Receives a passport image or a single/multi-page PDF, extracts data from
-    each page, and creates new passport records for each successful extraction.
-    Returns a summary of successful and failed pages.
-    """
-    contents = await file.read()
-    
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file.filename) as temp_file:
+            while content := await file.read(1024 * 1024):
+                temp_file.write(content)
+            temp_file_path = temp_file.name
+    except Exception:
+        raise HTTPException(status_code=500, detail="Could not save uploaded file to disk.")
+
+    background_tasks.add_task(os.unlink, temp_file_path)
+
     extraction_results = ocr_service.extract_passport_data(
-        file_content=contents,
+        file_path=temp_file_path,
         content_type=file.content_type
     )
 
     successes = []
     failures = []
 
+    # --- CHANGED SECTION ---
+    # This loop now handles errors for each page individually.
     for result in extraction_results:
         page_number = result.get("page_number")
+
+        if "error" in result:
+            # This handles errors from the OCR service itself (e.g., couldn't read page)
+            failures.append({"page_number": page_number, "detail": result["error"]})
+            continue # <-- Move to the next page
+
         if "data" in result:
             passport_data = result["data"]
             
-            if destination:
-                passport_data["destination"] = destination
-            
-            passport_create_schema = schemas.PassportCreate(**passport_data)
+            # Best Practice: Use a try/except block to catch validation errors for each page.
             try:
-                created_passport = crud.create_user_passport(db=db, passport=passport_create_schema, user_id=current_user.id)
-                successes.append(created_passport)
-            except HTTPException as e:
-                failures.append({"page_number": page_number, "detail": e.detail})
-        elif "error" in result:
-            failures.append({"page_number": page_number, "detail": result["error"]})
+                if destination:
+                    passport_data["destination"] = destination
+                
+                # 1. Attempt to validate the data for this page
+                passport_create_schema = schemas.PassportCreate(**passport_data)
 
+                # 2. If validation succeeds, attempt to create the database record
+                created_passport = crud.create_user_passport(
+                    db=db, passport=passport_create_schema, user_id=current_user.id
+                )
+                successes.append(created_passport)
+
+            except ValidationError as e:
+                # 3. If Pydantic validation fails, add it to failures and continue
+                failures.append({"page_number": page_number, "detail": f"Validation Error: {e.errors()[0]['msg']}"})
+            
+            except HTTPException as e:
+                # 4. If database creation fails (e.g., duplicate), add it to failures and continue
+                failures.append({"page_number": page_number, "detail": e.detail})
+    # --- END OF CHANGED SECTION ---
+    
     return {"successes": successes, "failures": failures}
 
 # /export/data endpoint

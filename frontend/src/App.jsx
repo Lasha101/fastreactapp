@@ -790,6 +790,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 
 const API_URL = '/api';
+// const API_URL = 'http://localhost:8000';
 
 // --- STYLES COMPONENT (Integrated) ---
 const GlobalStyles = () => (
