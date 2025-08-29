@@ -233,6 +233,20 @@ def create_passport(passport: schemas.PassportCreate, db: Session = Depends(get_
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 @app.post("/passports/upload-and-extract/", response_model=schemas.OcrUploadResponse)
 async def upload_and_extract_passport(
     background_tasks: BackgroundTasks,
@@ -296,10 +310,7 @@ async def upload_and_extract_passport(
                 created_passport = crud.create_user_passport(
                     db=db, passport=passport_create_schema, user_id=current_user.id
                 )
-                
-                # --- THIS IS THE MODIFIED LINE ---
-                # We now append a dictionary to include the page number with the success data.
-                successes.append({"page_number": page_number, "data": created_passport})
+                successes.append(created_passport)
 
             except ValidationError as e:
                 # c. If Pydantic validation fails, record it as a failure.
@@ -314,6 +325,108 @@ async def upload_and_extract_passport(
     
     # 5. Return a successful response with lists of successes and failures.
     return {"successes": successes, "failures": failures}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# @app.post("/passports/upload-and-extract/", response_model=schemas.OcrUploadResponse)
+# async def upload_and_extract_passport(
+#     background_tasks: BackgroundTasks,
+#     destination: Optional[str] = Form(None),
+#     file: UploadFile = File(...),
+#     db: Session = Depends(get_db),
+#     current_user: models.User = Depends(auth.get_current_active_user)
+# ):
+#     """
+#     Receives a passport image or a multi-page PDF, streams it to a temporary file,
+#     extracts data from each page, and creates new passport records.
+    
+#     This function handles errors on a per-page basis:
+#     - Successful extractions are saved to the database.
+#     - Pages with OCR errors or data validation errors are rejected and reported.
+#     The entire operation does not crash if some pages are invalid.
+#     """
+#     # 1. Stream the uploaded file to a temporary file on disk to save memory.
+#     try:
+#         with tempfile.NamedTemporaryFile(delete=False, suffix=file.filename) as temp_file:
+#             while content := await file.read(1024 * 1024):  # Read in 1MB chunks
+#                 temp_file.write(content)
+#             temp_file_path = temp_file.name
+#     except Exception:
+#         raise HTTPException(status_code=500, detail="Could not save uploaded file to disk.")
+
+#     # 2. Schedule the temporary file to be deleted after the response is sent.
+#     background_tasks.add_task(os.unlink, temp_file_path)
+
+#     # 3. Call the OCR service to process the file from its disk path.
+#     extraction_results = ocr_service.extract_passport_data(
+#         file_path=temp_file_path,
+#         content_type=file.content_type
+#     )
+
+#     successes = []
+#     failures = []
+
+#     # 4. Loop through results and handle each page individually.
+#     for result in extraction_results:
+#         page_number = result.get("page_number")
+
+#         # Handle pages where the OCR service itself reported an error.
+#         if "error" in result:
+#             failures.append({"page_number": page_number, "detail": result["error"]})
+#             continue  # Skip to the next page
+
+#         if "data" in result:
+#             passport_data = result["data"]
+            
+#             # Use a try/except block to isolate validation and database errors.
+#             try:
+#                 # Add the optional destination if provided.
+#                 if destination:
+#                     passport_data["destination"] = destination
+                
+#                 # a. Attempt to validate the data using your Pydantic schema.
+#                 passport_create_schema = schemas.PassportCreate(**passport_data)
+
+#                 # b. If validation succeeds, create the passport in the database.
+#                 created_passport = crud.create_user_passport(
+#                     db=db, passport=passport_create_schema, user_id=current_user.id
+#                 )
+                
+#                 # --- THIS IS THE MODIFIED LINE ---
+#                 # We now append a dictionary to include the page number with the success data.
+#                 successes.append({"page_number": page_number, "data": created_passport})
+
+#             except ValidationError as e:
+#                 # c. If Pydantic validation fails, record it as a failure.
+#                 # We extract the first, most relevant error message.
+#                 first_error = e.errors()[0]
+#                 error_message = f"Validation Error on field '{first_error['loc'][0]}': {first_error['msg']}"
+#                 failures.append({"page_number": page_number, "detail": error_message})
+            
+#             except Exception as e:
+#                 # d. Catch any other unexpected errors during DB creation.
+#                 failures.append({"page_number": page_number, "detail": f"A database error occurred: {str(e)}"})
+    
+#     # 5. Return a successful response with lists of successes and failures.
+#     return {"successes": successes, "failures": failures}
 
 
 
