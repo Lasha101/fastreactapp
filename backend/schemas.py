@@ -90,8 +90,15 @@ class OcrFailure(BaseModel):
     page_number: int
     detail: str
 
+
+# ADD THIS NEW SCHEMA
+class OcrSuccess(BaseModel):
+    page_number: int
+    data: Passport
+
+# UPDATE THIS SCHEMA
 class OcrUploadResponse(BaseModel):
-    successes: List[Passport]
+    successes: List[OcrSuccess] # This now uses the new OcrSuccess schema
     failures: List[OcrFailure]
 
 # This line is needed at the end of the file to resolve the forward reference

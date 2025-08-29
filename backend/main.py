@@ -296,7 +296,10 @@ async def upload_and_extract_passport(
                 created_passport = crud.create_user_passport(
                     db=db, passport=passport_create_schema, user_id=current_user.id
                 )
-                successes.append(created_passport)
+                
+                # --- THIS IS THE MODIFIED LINE ---
+                # We now append a dictionary to include the page number with the success data.
+                successes.append({"page_number": page_number, "data": created_passport})
 
             except ValidationError as e:
                 # c. If Pydantic validation fails, record it as a failure.
