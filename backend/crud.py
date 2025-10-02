@@ -101,39 +101,46 @@ def get_passports_by_user(db: Session, user_id: int):
     return db.query(models.Passport).filter(models.Passport.owner_id == user_id).all()
 
 def create_user_passport(db: Session, passport: schemas.PassportCreate, user_id: int):
+    # First, check if a passport with this number already exists for the current user.
+    db_passport = db.query(models.Passport).filter(
+        models.Passport.passport_number == passport.passport_number,
+        models.Passport.owner_id == user_id
+    ).first()
+
+    # If the passport does not exist, create a new one.
+    if not db_passport:
+        passport_data = passport.model_dump(exclude={"destination", "confidence_score"})
+        db_passport = models.Passport(
+            **passport_data, 
+            owner_id=user_id, 
+            confidence_score=passport.confidence_score
+        )
+        db.add(db_passport)
+        db.commit()
+        db.refresh(db_passport)
+
+    # Now, handle the destination/voyage association.
     if passport.destination:
-        existing_association = db.query(models.Passport).join(models.Passport.voyages).filter(
-            models.Passport.owner_id == user_id,
-            models.Passport.passport_number == passport.passport_number,
-            models.Voyage.destination == passport.destination
-        ).first()
-
-        if existing_association:
-            raise HTTPException(
-                status_code=HTTPStatus.CONFLICT,
-                detail=f"Le passeport numéro '{passport.passport_number}' est déjà enregistré pour la destination '{passport.destination}'.",
-            )
-
-    passport_data = passport.model_dump(exclude={"destination", "confidence_score"})
-    db_passport = models.Passport(**passport_data, owner_id=user_id, confidence_score=passport.confidence_score)
-    db.add(db_passport)
-    db.commit()
-    db.refresh(db_passport)
-
-    if passport.destination:
+        # Find the voyage for the user and destination.
         db_voyage = db.query(models.Voyage).filter(
             models.Voyage.user_id == user_id,
             models.Voyage.destination == passport.destination
         ).first()
 
+        # If the voyage doesn't exist, create it.
         if not db_voyage:
             db_voyage = models.Voyage(destination=passport.destination, user_id=user_id)
             db.add(db_voyage)
+            # We commit here to give the voyage an ID before associating it
+            db.commit()
+            db.refresh(db_voyage)
 
-        db_passport.voyages.append(db_voyage)
-
-    db.commit()
-    db.refresh(db_passport)
+        # Check if the passport is already associated with this voyage.
+        if db_passport not in db_voyage.passports:
+            db_voyage.passports.append(db_passport)
+            db.commit()
+            db.refresh(db_passport)
+    
     return db_passport
 
 def update_passport(db: Session, passport_id: int, passport_update: schemas.PassportCreate):
@@ -180,6 +187,22 @@ def delete_passport(db: Session, passport_id: int):
         db.delete(db_passport)
         db.commit()
     return db_passport
+
+def delete_passports_by_ids(db: Session, *, passport_ids: List[int], user_id: int, is_admin: bool):
+    """
+    Deletes multiple passports from the database based on a list of IDs.
+    - If the user is not an admin, it will only delete passports that belong to them.
+    """
+    query = db.query(models.Passport).filter(models.Passport.id.in_(passport_ids))
+    
+    # Security check: Non-admins can only delete their own passports.
+    if not is_admin:
+        # Correctly checks against the 'owner_id' column
+        query = query.filter(models.Passport.owner_id == user_id)
+        
+    num_deleted = query.delete(synchronize_session=False)
+    db.commit()
+    return num_deleted
 
 def get_voyage(db: Session, voyage_id: int):
     return db.query(models.Voyage).filter(models.Voyage.id == voyage_id).first()
