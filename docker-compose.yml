@@ -1,24 +1,42 @@
-# docker-compose.yml
-
 version: '3.8'
 
 services:
-  backend:
-    build: ./backend
+  # --- NGINX (Frontend Service) ---
+  nginx:
+    build:
+      context: ./frontend
     ports:
-      - "8000:8000"
-    volumes:
-      - ./backend:/app
-    environment:
-      - DATABASE_URL=sqlite:///./travel_app.db
-      # Add other environment variables here if needed
-
-  frontend:
-    build: ./frontend
-    ports:
-      - "80:80"
-    volumes:
-      - ./frontend/src:/app/src
+      - "80:80" # Expose HTTP port to the world
     depends_on:
       - backend
 
+  # --- FASTAPI (Backend Service) ---
+  backend:
+    build:
+      context: ./backend
+    # Do NOT expose ports to the host. Nginx will proxy to it.
+    volumes:
+      # Mount the credentials file into the container
+      - ./google-credentials.json:/app/google-credentials.json:ro
+    env_file:
+      - ./.env.prod # Load production environment variables
+    depends_on:
+      - redis
+
+  # --- REDIS (Message Broker) ---
+  redis:
+    image: "redis:7-alpine"
+    # No ports exposed to the host, only accessible within the Docker network.
+
+  # --- CELERY (Worker Service) ---
+  worker:
+    build:
+      context: ./backend
+    command: ["celery", "-A", "celery_worker.celery_app", "worker", "--loglevel=info"]
+    volumes:
+      - ./google-credentials.json:/app/google-credentials.json:ro
+    env_file:
+      - ./.env.prod
+    depends_on:
+      - redis
+      - backend

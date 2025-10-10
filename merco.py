@@ -13,8 +13,14 @@ specific_files_to_merge = [
     'backend/models.py',
     'backend/database.py',
     'backend/auth.py',
-    'ocr_service.py',
+    'backend/ocr_service.py',
+    'backend/celery_worker.py',
+    '.github/workflows/deploy.yml',
+    'backend/Dockerfile',
     'frontend/src/App.jsx',
+    'frontend/Dockerfile',
+    'frontend/nginx.conf',
+    'docker-compose.yml',
 ]
 
 # 2. Choose a name for the final, combined file.
@@ -58,3 +64,4 @@ print("\n✨ Done! Merged content is in the output file and your clipboard.")
 
 
 
+# during multpage document extracting extracting if there a passport by text starting by "FRALE" extracting fails while the programm can extract only if this starts with "FRA" but sometimes the french last names sterts with "LE" and this makes a problem to the extractor functionality!

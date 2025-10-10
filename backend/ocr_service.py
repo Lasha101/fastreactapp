@@ -1,291 +1,276 @@
+# backend/ocr_service.py
 
 import re
+import os
+import json
 from datetime import datetime
-from google.cloud import vision
+from google.cloud import vision, storage
 from fastapi import HTTPException
 import logging
-import fitz  # PyMuPDF
-import unicodedata
+from typing import Tuple, Optional, Dict
 
-
-
-# It's good practice to use logging to see what the OCR is detecting
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def clean_and_parse_date(date_str: str) -> datetime | None:
+# --- Google Cloud Clients ---
+# Initialize clients once and reuse them.
+# Credentials will be picked up from the GOOGLE_APPLICATION_CREDENTIALS env var.
+try:
+    vision_client = vision.ImageAnnotatorClient()
+    storage_client = storage.Client()
+except Exception as e:
+    logger.error(f"Could not initialize Google Cloud clients: {e}")
+    # You might want to handle this more gracefully
+    vision_client = None
+    storage_client = None
+
+GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
+
+def _upload_to_gcs(file_path: str, destination_blob_name: str) -> str:
+    """Uploads a file to the GCS bucket."""
+    if not GCS_BUCKET_NAME or not storage_client:
+        raise ValueError("GCS_BUCKET_NAME environment variable not set or storage client not initialized.")
+    bucket = storage_client.bucket(GCS_BUCKET_NAME)
+    blob = bucket.blob(destination_blob_name)
+    blob.upload_from_filename(file_path)
+    return f"gs://{GCS_BUCKET_NAME}/{destination_blob_name}"
+
+def _delete_from_gcs(gcs_uri: str):
+    """Deletes a file from the GCS bucket."""
+    if not gcs_uri.startswith(f"gs://{GCS_BUCKET_NAME}/"):
+        logger.error(f"Cannot delete blob: URI '{gcs_uri}' is not in the configured bucket.")
+        return
+    try:
+        if not storage_client:
+            logger.error("Storage client not initialized, cannot delete GCS blob.")
+            return
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        blob_name = gcs_uri.replace(f"gs://{GCS_BUCKET_NAME}/", "")
+        blob = bucket.blob(blob_name)
+        blob.delete()
+        logger.info(f"Successfully deleted blob: {gcs_uri}")
+    except Exception as e:
+        logger.error(f"Failed to delete blob {gcs_uri}: {e}")
+
+def start_async_ocr_extraction(file_path: str, content_type: str) -> Tuple[str, str]:
     """
-    Cleans a date string by removing unexpected characters and
-    attempts to parse it into a datetime object.
+    Starts an asynchronous OCR job for a multi-page document.
+    It uploads the file to GCS and triggers the batch annotation.
     """
+    if not vision_client:
+        raise RuntimeError("Google Vision client is not initialized.")
+        
+    if not content_type == "application/pdf":
+        raise HTTPException(status_code=400, detail="Only multi-page PDF files are supported for batch processing.")
+
+    # Create a unique name for the file in the GCS bucket
+    timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+    unique_filename = f"uploads/{timestamp}-{os.path.basename(file_path)}"
+
+    # 1. Upload the file to GCS
+    try:
+        gcs_source_uri = _upload_to_gcs(file_path, unique_filename)
+        logger.info(f"File uploaded to GCS at: {gcs_source_uri}")
+    except Exception as e:
+        logger.error(f"Failed to upload to GCS: {e}")
+        raise HTTPException(status_code=500, detail=f"Could not upload file to cloud storage: {e}")
+
+    # 2. Configure and start the async OCR request
+    gcs_destination_uri = f"gs://{GCS_BUCKET_NAME}/results/{unique_filename}-"
+    mime_type = 'application/pdf'
+    feature = vision.Feature(type_=vision.Feature.Type.DOCUMENT_TEXT_DETECTION)
+    gcs_source = vision.GcsSource(uri=gcs_source_uri)
+    input_config = vision.InputConfig(gcs_source=gcs_source, mime_type=mime_type)
+    gcs_destination = vision.GcsDestination(uri=gcs_destination_uri)
+    output_config = vision.OutputConfig(gcs_destination=gcs_destination, batch_size=5) # Group results for 5 pages into one JSON
+
+    async_request = vision.AsyncAnnotateFileRequest(
+        features=[feature],
+        input_config=input_config,
+        output_config=output_config
+    )
+
+    operation = vision_client.async_batch_annotate_files(requests=[async_request])
+    logger.info(f"Started Google Vision async operation: {operation.operation.name}")
+
+    # Return both the operation name (to track progress) and the original GCS URI (to delete later)
+    return operation.operation.name, gcs_source_uri
+
+def get_async_ocr_results(operation_name: str) -> dict:
+    """
+    Checks the status of a long-running OCR operation and returns the results if complete.
+    """
+    if not vision_client or not storage_client:
+        raise RuntimeError("Google Cloud clients are not initialized.")
+        
+    logger.info(f"Checking operation status: {operation_name}")
+    # This uses the default operations client from the vision_client
+    operation_client = vision_client.transport.operations_client
+    operation = operation_client.get_operation(name=operation_name)
+
+    if not operation.done:
+        return {"status": "PROCESSING"}
+
+    if operation.error.message:
+        logger.error(f"Operation failed: {operation.error.message}")
+        return {"status": "FAILURE", "error": operation.error.message}
+
+    # --- If done, process the results from GCS ---
+    # The response is embedded in the operation metadata for file annotation
+    from google.cloud.vision_v1.types import AsyncBatchAnnotateFilesResponse
+    response = AsyncBatchAnnotateFilesResponse.from_json(operation.response.value)
+    destination_uri = response.output_config.gcs_destination.uri
+    
+    prefix = destination_uri.replace(f"gs://{GCS_BUCKET_NAME}/", "")
+    
+    bucket = storage_client.bucket(GCS_BUCKET_NAME)
+    blob_list = list(bucket.list_blobs(prefix=prefix)) # Get all result files
+
+    results = []
+    # Loop through all result files generated by Google Vision
+    for blob in blob_list:
+        json_string = blob.download_as_string()
+        response_json = json.loads(json_string)
+        
+        for page_num_in_blob, page_response in enumerate(response_json['responses']):
+            page_context = page_response.get('context', {})
+            # Vision API gives page numbers starting from 1
+            actual_page_num = page_context.get('page_number', page_num_in_blob + 1)
+            try:
+                if page_response.get('error'):
+                    raise ValueError(page_response['error']['message'])
+                
+                full_text = page_response.get('fullTextAnnotation', {}).get('text', '')
+                if not full_text:
+                    raise ValueError("No text detected on page.")
+
+                parsed_data = _parse_french_id_card_text(full_text)
+                
+                # Calculate an average confidence score for the page
+                total_confidence = 0
+                symbol_count = 0
+                for page in page_response.get('fullTextAnnotation', {}).get('pages', []):
+                    for block in page.get('blocks', []):
+                        for paragraph in block.get('paragraphs', []):
+                            for word in paragraph.get('words', []):
+                                for symbol in word.get('symbols', []):
+                                    total_confidence += symbol.get('confidence', 0)
+                                    symbol_count += 1
+                
+                average_confidence = (total_confidence / symbol_count) if symbol_count > 0 else 0.0
+                parsed_data['confidence_score'] = round(average_confidence, 4)
+
+                results.append({"page_number": actual_page_num, "data": parsed_data, "status": "SUCCESS"})
+            except Exception as e:
+                logger.warning(f"Failed to parse page {actual_page_num}: {e}")
+                results.append({"page_number": actual_page_num, "error": str(e), "status": "FAILURE"})
+    
+    # --- Clean up the result files from GCS after processing ---
+    for blob in blob_list:
+        blob.delete()
+        
+    return {"status": "SUCCESS", "results": results}
+
+
+def cancel_google_ocr_operation(operation_name: str):
+    """Requests cancellation of a Google Vision API operation."""
+    try:
+        if not vision_client:
+            logger.error("Vision client not initialized, cannot cancel operation.")
+            return
+        logger.info(f"Requesting cancellation for operation: {operation_name}")
+        vision_client.transport.operations_client.cancel_operation(name=operation_name)
+    except Exception as e:
+        logger.error(f"Failed to send cancellation request for operation {operation_name}: {e}")
+
+def _parse_date(date_str: Optional[str]) -> Optional[str]:
+    """Helper to parse and format date string."""
     if not date_str:
         return None
-    # Replace common separators like '.' or ',' with a space to handle OCR errors
-    cleaned_str = re.sub(r'[.,]', ' ', date_str)
-    # Remove any other non-digit, non-space characters
-    cleaned_str = re.sub(r'[^\d\s]', '', cleaned_str)
-    # Normalize multiple spaces to a single space
-    cleaned_str = re.sub(r'\s+', ' ', cleaned_str).strip()
-    
-    # The expected format is DD MM YYYY
     try:
-        return datetime.strptime(cleaned_str, "%d %m %Y")
+        # Assuming format DD.MM.YYYY or DD/MM/YYYY
+        cleaned_date_str = date_str.replace('.', '/')
+        dt_obj = datetime.strptime(cleaned_date_str, '%d/%m/%Y')
+        return dt_obj.strftime('%Y-%m-%d')
     except ValueError:
-        logger.warning(f"Impossible d'analyser la date : '{date_str}' (nettoyée en: '{cleaned_str}')")
+        logger.warning(f"Could not parse date string: {date_str}")
         return None
 
-
-def _extract_passport_data_from_image_bytes(image_bytes: bytes) -> dict:
+def _parse_french_id_card_text(raw_text: str) -> Dict[str, Optional[str]]:
     """
-    (Internal function) Uses Google Vision API to extract text from image bytes
-    and attempts to parse it into structured French passport data.
-
-    Args:
-        image_bytes: The byte content of an image file (PNG, JPEG, etc.).
-
-    Returns:
-        A dictionary containing the extracted passport information.
+    Parses raw OCR text from a French ID card to extract structured data.
+    This parser is an educated guess and may need significant refinement
+    based on the quality and format of your specific document scans.
     """
-    client = vision.ImageAnnotatorClient()
-    image = vision.Image(content=image_bytes)
-    image_context = vision.ImageContext(language_hints=['fr'])
-
-    # Perform document text detection for better accuracy on documents
-    response = client.document_text_detection(image=image, image_context=image_context)
-    full_text_annotation = response.full_text_annotation
-
-    if not full_text_annotation or not full_text_annotation.pages:
-        raise HTTPException(status_code=400, detail="Aucun texte n'a pu être détecté dans le document.")
-
-    # The full, raw text.
-    raw_text = full_text_annotation.text
-    clean_text = re.sub(r'[\n/]', ' ', raw_text)  # Replace newlines and slashes with spaces
-    full_text = re.sub(r'\s+', ' ', clean_text).strip()  # Normalize all whitespace
-
-    logger.info("--- Texte OCR extrait complet ---")
-    logger.info(full_text)
-    logger.info("-----------------------------")
-
-    # --- Parsing Logic for French Passports ---
     data = {
-        "first_name": "", "last_name": "", "passport_number": "",
-        "nationality": "", "birth_date": "", "delivery_date": "",
-        "expiration_date": "", "confidence_score": 0.0
+        "first_name": None,
+        "last_name": None,
+        "passport_number": None,
+        "birth_date": None,
+        "delivery_date": None,
+        "expiration_date": None,
+        "nationality": "FRANCAISE", # Default for French ID
     }
 
-    # --- MRZ-First Parsing & Verification ---
-    mrz_text = full_text.replace(' ', '').replace('<', '<')
-    mrz_line1_match = re.search(r'P<FRA([A-Z<]+)<<([A-Z<]+)', mrz_text)
-    if mrz_line1_match:
-        data["last_name"] = mrz_line1_match.group(1).replace('<', ' ').strip()
-        data["first_name"] = ' '.join(mrz_line1_match.group(2).replace('<', ' ').strip().split())
+    # Normalize text for easier regex matching
+    text_lines = [line.strip() for line in raw_text.split('\n')]
+    full_text_single_line = ' '.join(text_lines)
 
-    mrz_line2_match = re.search(r'(\d{2}[A-Z]{2}\d{5})\d?(FRA)(\d{2}\d{2}\d{2})\d[MFX<](\d{2}\d{2}\d{2})', mrz_text)
-    if mrz_line2_match:
-        data["nationality"] = "Française"
-        data["passport_number"] = mrz_line2_match.group(1)
-        dob_str = mrz_line2_match.group(3)
-        try:
-            year = int(dob_str[0:2])
-            # Corrected century logic for birth dates
-            current_year_short = datetime.now().year % 100
-            prefix = "19" if year > current_year_short else "20"
-            dob_dt = datetime.strptime(f"{prefix}{dob_str}", "%Y%m%d")
-            data["birth_date"] = dob_dt.strftime("%Y-%m-%d")
-        except ValueError:
-            logger.warning(f"Impossible d'analyser la date de naissance à partir de la MRZ : {dob_str}")
+    # --- Regex for common fields ---
+    # Passport Number (ID Card Number) - often 12 digits for CNIe
+    id_match = re.search(r'(\b\d{2}[A-Z\d]{2}\s?\d{5}\b)', full_text_single_line)
+    if id_match:
+        data["passport_number"] = id_match.group(1).replace(" ", "")
 
-        exp_str = mrz_line2_match.group(4)
-        try:
-            # Assuming expiration dates are always in the 21st century for modern passports
-            exp_dt = datetime.strptime(f"20{exp_str}", "%Y%m%d")
-            data["expiration_date"] = exp_dt.strftime("%Y-%m-%d")
-        except ValueError:
-            logger.warning(f"Impossible d'analyser la date d'expiration à partir de la MRZ : {exp_str}")
+    # Last Name (Nom)
+    last_name_match = re.search(r'Nom\s*[:\s]+\s*([A-Z\s\'-]+)', raw_text, re.IGNORECASE)
+    if last_name_match:
+        data["last_name"] = last_name_match.group(1).strip()
 
-    # --- Visual Zone Parsing (Fallback) ---
-    if not data["passport_number"]:
-        passport_match = re.search(r'\b(\d{2}[A-Z]{2}\d{5})\b', full_text)
-        if passport_match: data["passport_number"] = passport_match.group(1)
-    if not data["last_name"]:
-        last_name_match = re.search(r'(?:Nom|SURNAME)\s+([A-Z\s\'-]+?)(?=\s*Prénom|GIVEN|Nationalité|Date|P<|$)', full_text, re.IGNORECASE)
-        if last_name_match: data["last_name"] = last_name_match.group(1).strip()
-    if not data["first_name"]:
-        first_name_match = re.search(r'(?:Prénom\(s\)|Prénoms|GIVEN NAMES)\s+([A-Z][a-zA-Z\s\'-]+?)(?=\s*Nationalité|Date|Sexe|Sex|P<|$)', full_text, re.IGNORECASE)
-        if first_name_match: data["first_name"] = first_name_match.group(1).strip()
-    if data["last_name"] and not data["first_name"] and ' ' in data["last_name"]:
-        parts = data["last_name"].split()
-        if len(parts) > 1:
-            data["last_name"] = parts[0]
-            data["first_name"] = " ".join(parts[1:])
-    if not data["nationality"]:
-        nationality_match = re.search(r'(?:Nationalité|Nationality)\s+([A-Za-zçÇéÉèÈàÀâÂêÊîÎôÔûÛ]+)', full_text, re.IGNORECASE)
-        if nationality_match and "française".lower() in nationality_match.group(1).lower():
-            data["nationality"] = "Française"
-    if not data["delivery_date"]:
-        date_matches = re.findall(r'(\d{2}\s*[.,]?\s*\d{2}\s*[.,]?\s*\d{4})', full_text)
-        parsed_dates = [dt for dt_str in date_matches if (dt := clean_and_parse_date(dt_str))]
-        unique_dates = sorted(list(set(parsed_dates)))
-        birth_dt = datetime.strptime(data["birth_date"], "%Y-%m-%d") if data["birth_date"] else None
-        exp_dt = datetime.strptime(data["expiration_date"], "%Y-%m-%d") if data["expiration_date"] else None
-        for dt in unique_dates:
-            if dt != birth_dt and dt != exp_dt:
-                data["delivery_date"] = dt.strftime("%Y-%m-%d")
-                break
+    # First Name (Prénoms)
+    first_name_match = re.search(r'Prénom\(s\)\s*[:\s]+\s*([A-Z\s\'-]+)', raw_text, re.IGNORECASE)
+    if first_name_match:
+        data["first_name"] = first_name_match.group(1).strip()
 
-    relevant_confidences = []
-    target_words = set()
+    # Birth Date (Né(e) le)
+    birth_date_match = re.search(r'Né\(e\)\s+le\s+(\d{2}[./]\d{2}[./]\d{4})', raw_text, re.IGNORECASE)
+    if birth_date_match:
+        data["birth_date"] = _parse_date(birth_date_match.group(1))
 
-    def clean_for_match(text: str) -> str:
-        text = text.upper()
-        text = ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
-        text = re.sub(r'[^A-Z0-9]', '', text)
-        return text
+    # --- Regex for dates based on proximity ---
+    # Often dates appear in a sequence: DD.MM.YYYY - DD.MM.YYYY
+    date_pattern = r'(\d{2}\.\d{2}\.\d{4})'
+    all_dates = re.findall(date_pattern, full_text_single_line)
+    if len(all_dates) >= 2:
+        # A common pattern is Delivery Date then Expiry Date
+        data["delivery_date"] = _parse_date(all_dates[0])
+        data["expiration_date"] = _parse_date(all_dates[1])
+
+
+    # --- Fallback using Machine Readable Zone (MRZ) if present ---
+    # Example MRZ: IDFRA<LASTNAME><<FIRSTNAME<<<<<<<<<<<<<
+    mrz_line = None
+    for line in text_lines:
+        if line.startswith('IDFRA'):
+            mrz_line = line.replace(' ', '')
+            break
     
-    fields_to_score = ["last_name", "first_name", "passport_number", "nationality"]
+    if mrz_line:
+        if not data["passport_number"]:
+             # Extract from first part of MRZ if available
+             pass # MRZ format varies, add logic if needed.
 
-    for field in fields_to_score:
-        value = data.get(field, "")
-        if value:
-            parts = re.split(r'[\s-]+', value.upper())
-            cleaned_parts = [clean_for_match(p) for p in parts if p]
-            for part in cleaned_parts:
-                target_words.add(part)
-            if len(cleaned_parts) > 1:
-                concat = ''.join(cleaned_parts)
-                target_words.add(concat)
+        # MRZ parsing is complex, this is a simplified example
+        parts = mrz_line[5:].split('<<')
+        if len(parts) >= 2:
+            if not data["last_name"]:
+                data["last_name"] = parts[0].replace('<', ' ').strip()
+            if not data["first_name"]:
+                data["first_name"] = parts[1].replace('<', ' ').strip()
 
-    logger.info(f"DEBUG: Mots cibles pour le score : {target_words}")
-
-    for page in full_text_annotation.pages:
-        for block in page.blocks:
-            for paragraph in block.paragraphs:
-                for word in paragraph.words:
-                    word_text = ''.join(symbol.text for symbol in word.symbols)
-                    confidence = word.confidence
-                    cleaned_description = clean_for_match(word_text)
-                    if cleaned_description and cleaned_description in target_words:
-                        logger.info(f"  └─> CORRESPONDANCE TROUVÉE pour '{cleaned_description}'!")
-                        relevant_confidences.append(confidence)
-    
-    final_confidence = sum(relevant_confidences) / len(relevant_confidences) if relevant_confidences else 0.0
-    data["confidence_score"] = round(final_confidence, 4)
-    logger.info(f"--- Score de confiance des mots pertinents : {data['confidence_score']:.2f} ---")
-    
-    logger.info(f"--- Données analysées ---\n{data}\n--------------------")
-
-    if data["nationality"] != "Française":
-        raise HTTPException(status_code=422, detail="Le document n'a pas pu être confirmé comme un passeport français.")
-    if not all([data["passport_number"], data["last_name"], data["first_name"], data["birth_date"], data["expiration_date"]]):
-        raise HTTPException(status_code=422, detail="Impossible d'analyser automatiquement tous les détails essentiels du passeport.")
-
+    # Final validation check
+    if not all([data["last_name"], data["first_name"], data["birth_date"], data["passport_number"]]):
+        missing_fields = [k for k, v in data.items() if v is None and k in ["last_name", "first_name", "birth_date", "passport_number"]]
+        raise ValueError(f"Could not parse all required fields. Missing: {', '.join(missing_fields)}.")
+        
     return data
-
-
-
-# def extract_passport_data(file_content: bytes, content_type: str) -> list:
-#     results = []
-
-#     if content_type.startswith("image/"):
-#         logger.info("Traitement en tant que fichier image unique.")
-#         try:
-#             extracted_data = _extract_passport_data_from_image_bytes(file_content)
-#             results.append({"page_number": 1, "data": extracted_data})
-#         except HTTPException as e:
-#             results.append({"page_number": 1, "error": e.detail})
-#         except Exception as e:
-#             logger.error(f"Erreur inattendue lors du traitement de l'image : {e}")
-#             results.append({"page_number": 1, "error": "Une erreur serveur inattendue est survenue lors du traitement."})
-
-#     elif content_type == "application/pdf":
-#         logger.info("Traitement en tant que fichier PDF.")
-#         try:
-#             pdf_document = fitz.open(stream=file_content, filetype="pdf")
-#             for page_num in range(len(pdf_document)):
-#                 page_index = page_num + 1
-#                 logger.info(f"--- Traitement de la page PDF {page_index} ---")
-#                 try:
-#                     page = pdf_document.load_page(page_num)
-#                     pix = page.get_pixmap(dpi=300)
-#                     image_bytes = pix.tobytes("png")
-#                     extracted_data = _extract_passport_data_from_image_bytes(image_bytes)
-#                     results.append({"page_number": page_index, "data": extracted_data})
-#                     logger.info(f"Données extraites avec succès de la page {page_index}.")
-#                 except HTTPException as e:
-#                     logger.warning(f"Échec de l'extraction des données de la page {page_index}: {e.detail}")
-#                     results.append({"page_number": page_index, "error": e.detail})
-#                 except Exception as e:
-#                     logger.error(f"Erreur inattendue sur la page {page_index}: {e}")
-#                     results.append({"page_number": page_index, "error": "Une erreur serveur inattendue est survenue."})
-#             pdf_document.close()
-#         except Exception as e:
-#             logger.error(f"Échec de l'ouverture ou de la lecture du fichier PDF : {e}")
-#             raise HTTPException(status_code=500, detail=f"Erreur lors de la lecture du fichier PDF : {e}")
-#     else:
-#         raise HTTPException(status_code=400, detail=f"Type de fichier non supporté : {content_type}.")
-
-#     if not results:
-#         raise HTTPException(status_code=500, detail="Échec de la production de résultats à partir du fichier téléchargé.")
-
-#     return results
-
-
-
-
-def extract_passport_data(file_path: str, content_type: str) -> list:
-    results = []
-
-    if content_type.startswith("image/"):
-        logger.info("Processing as a single image file from disk.")
-        try:
-            # --- CHANGED SECTION ---
-            # Read the bytes from the file on disk only when needed
-            with open(file_path, "rb") as f:
-                image_bytes = f.read()
-            extracted_data = _extract_passport_data_from_image_bytes(image_bytes)
-            # --- END OF CHANGED SECTION ---
-            results.append({"page_number": 1, "data": extracted_data})
-        except HTTPException as e:
-            results.append({"page_number": 1, "error": e.detail})
-        except Exception as e:
-            logger.error(f"Unexpected error while processing image from disk: {e}")
-            results.append({"page_number": 1, "error": "An unexpected server error occurred during processing."})
-
-    elif content_type == "application/pdf":
-        logger.info("Processing as a PDF file from disk.")
-        try:
-            # --- CHANGED SECTION ---
-            # Best Practice: Open the PDF directly from its file path.
-            # This is highly memory-efficient.
-            pdf_document = fitz.open(file_path)
-            # --- END OF CHANGED SECTION ---
-            for page_num in range(len(pdf_document)):
-                page_index = page_num + 1
-                logger.info(f"--- Processing PDF page {page_index} ---")
-                try:
-                    page = pdf_document.load_page(page_num)
-                    pix = page.get_pixmap(dpi=300)
-                    image_bytes = pix.tobytes("png")
-                    extracted_data = _extract_passport_data_from_image_bytes(image_bytes)
-                    results.append({"page_number": page_index, "data": extracted_data})
-                    logger.info(f"Successfully extracted data from page {page_index}.")
-                except HTTPException as e:
-                    logger.warning(f"Failed to extract data from page {page_index}: {e.detail}")
-                    results.append({"page_number": page_index, "error": e.detail})
-                except Exception as e:
-                    logger.error(f"Unexpected error on page {page_index}: {e}")
-                    results.append({"page_number": page_index, "error": "An unexpected server error occurred."})
-            pdf_document.close()
-        except Exception as e:
-            logger.error(f"Failed to open or read the PDF file from disk: {e}")
-            raise HTTPException(status_code=500, detail=f"Error reading PDF file: {e}")
-    else:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: {content_type}.")
-
-    if not results:
-        raise HTTPException(status_code=500, detail="Failed to produce any results from the uploaded file.")
-
-    return results
-
-
-# #              export GOOGLE_APPLICATION_CREDENTIALS="google-credentials.json"

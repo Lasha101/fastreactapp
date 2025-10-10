@@ -1,5 +1,3 @@
-# backend/Dockerfile
-
 # Use an official Python runtime as a parent image
 FROM python:3.11-slim
 
@@ -15,9 +13,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the backend application's code into the container at /app
 COPY . /app
 
-# Expose the port the app runs on
-EXPOSE 8000
+# No need to EXPOSE here, as docker-compose handles networking
 
-# Command to run the application with auto-reloading
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# --- CHANGED FOR PRODUCTION ---
+# Use Gunicorn as the process manager for Uvicorn
+CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "main:app", "--bind", "0.0.0.0:8000"]
 

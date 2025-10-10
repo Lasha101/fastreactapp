@@ -1,123 +1,36 @@
-
-
-# # /schemas.py
-# from pydantic import BaseModel, EmailStr
-# from typing import List, Optional
-# from datetime import date, datetime
-
-# class VoyageBase(BaseModel):
-#     destination: str
-
-# class VoyageCreate(VoyageBase):
-#     passport_ids: List[int] = []
-    
-# class Voyage(VoyageBase):
-#     id: int
-#     user_id: int
-#     class Config:
-#         from_attributes = True
-
-# class PassportBase(BaseModel):
-#     first_name: str
-#     last_name: str
-#     birth_date: date
-#     expiration_date: date
-#     delivery_date: date
-#     nationality: str
-#     passport_number: str
-#     confidence_score: Optional[float] = None
-
-# class PassportCreate(PassportBase):
-#     destination: Optional[str] = None
-
-# class Passport(PassportBase):
-#     id: int
-#     owner_id: int
-#     voyages: List[Voyage] = [] # This line is added
-#     class Config:
-#         from_attributes = True
-
-# class UserBase(BaseModel):
-#     first_name: str
-#     last_name: str
-#     email: EmailStr
-#     phone_number: str
-#     user_name: str
-
-# class UserCreate(UserBase):
-#     password: str
-
-# class UserUpdate(BaseModel):
-#     first_name: Optional[str] = None
-#     last_name: Optional[str] = None
-#     email: Optional[EmailStr] = None
-#     phone_number: Optional[str] = None
-#     password: Optional[str] = None
-
-# class User(UserBase):
-#     id: int
-#     role: str
-#     passports: List["Passport"] = [] # Added quotes to fix forward reference
-#     voyages: List[Voyage] = []
-#     class Config:
-#         from_attributes = True
-
-# class Token(BaseModel):
-#     access_token: str
-#     token_type: str
-
-# class TokenData(BaseModel):
-#     username: Optional[str] = None
-
-# class InvitationCreate(BaseModel):
-#     email: EmailStr
-
-# class Invitation(InvitationCreate):
-#     id: int
-#     token: str
-#     expires_at: datetime
-#     is_used: bool
-#     class Config:
-#         from_attributes = True
-
-
-# class InvitationUpdate(BaseModel):
-#     expires_at: Optional[datetime] = None
-#     is_used: Optional[bool] = None
-
-
-# class OcrFailure(BaseModel):
-#     page_number: int
-#     detail: str
-
-
-# class OcrUploadResponse(BaseModel):
-#     successes: List[Passport]
-#     failures: List[OcrFailure]
-
-
-
-# class IdsList(BaseModel):
-#     ids: List[int]
-
-# # This line is needed at the end of the file to resolve the forward reference
-# User.model_rebuild()
-
-
-
-
-
+# backend/schemas.py
 
 from pydantic import BaseModel, EmailStr
-from typing import List, Optional
+from typing import List, Optional, Any
 from datetime import date, datetime
+
+# --- NEW: Schemas for Asynchronous Task Handling ---
+
+class AsyncTaskCreateResponse(BaseModel):
+    """Response for a single task creation."""
+    task_id: str
+    filename: str
+
+class MultiAsyncTaskResponse(BaseModel):
+    """Response when multiple background tasks are created."""
+    tasks: List[AsyncTaskCreateResponse]
+
+class AsyncTaskStatus(BaseModel):
+    """Response when checking the status of a background task."""
+    task_id: str
+    status: str # e.g., PENDING, PROGRESS, SUCCESS, FAILURE, CANCELLED
+    progress: Optional[dict] = None # e.g., {"status": "Uploading..."}
+    result: Optional[Any] = None # Will contain the final result on SUCCESS/FAILURE
+
+
+# --- EXISTING SCHEMAS ---
 
 class VoyageBase(BaseModel):
     destination: str
 
 class VoyageCreate(VoyageBase):
     passport_ids: List[int] = []
-    
+
 class Voyage(VoyageBase):
     id: int
     user_id: int
@@ -128,8 +41,8 @@ class PassportBase(BaseModel):
     first_name: str
     last_name: str
     birth_date: date
-    expiration_date: date
-    delivery_date: date
+    expiration_date: Optional[date] = None
+    delivery_date: Optional[date] = None
     nationality: str
     passport_number: str
     confidence_score: Optional[float] = None
@@ -187,30 +100,11 @@ class Invitation(InvitationCreate):
     class Config:
         from_attributes = True
 
-
 class InvitationUpdate(BaseModel):
     expires_at: Optional[datetime] = None
     is_used: Optional[bool] = None
 
-
-class OcrFailure(BaseModel):
-    page_number: int
-    detail: str
-
-# NEW: Schema for a successful extraction, linking it to a page number
-class OcrSuccess(BaseModel):
-    page_number: int
-    passport: Passport
-
-class OcrUploadResponse(BaseModel):
-    successes: List[OcrSuccess] # CHANGED: Now uses the new OcrSuccess schema
-    failures: List[OcrFailure]
-
-
 class IdsList(BaseModel):
     ids: List[int]
 
-# This line is needed at the end of the file to resolve the forward reference
 User.model_rebuild()
-
-
