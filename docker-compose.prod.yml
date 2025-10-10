@@ -3,7 +3,7 @@ version: '3.8'
 services:
   # NGINX (Frontend and Reverse Proxy)
   frontend:
-    # Use the image we pushed to Docker Hub
+    # Use the image we pushed to Docker Hub on my account
     image: gurshabo55/fastreact-frontend:latest
     restart: always
     ports:
