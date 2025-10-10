@@ -32,7 +32,7 @@ services:
 
   # CELERY (Worker Service)
   worker:
-    image: your-dockerhub-username/fastreact-backend:latest # It uses the same image as the backend
+    image: gurshabo55/fastreact-backend:latest # It uses the same image as the backend
     restart: always
     command: ["celery", "-A", "celery_worker.celery_app", "worker", "--loglevel=info"]
     volumes:
