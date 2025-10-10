@@ -199,7 +199,7 @@ def create_passport(passport: schemas.PassportCreate, db: Session = Depends(get_
 
 
 # --- NEW: Passport OCR Upload Endpoint (Asynchronous) ---
-@app.post("/passports/upload-and-extract/", response_model=schemas.AsyncTaskResponse, status_code=status.HTTP_202_ACCEPTED)
+@app.post("/passports/upload-and-extract/", response_model=schemas.MultiAsyncTaskResponse, status_code=status.HTTP_202_ACCEPTED)
 async def upload_and_extract_passport_async(
     destination: Optional[str] = Form(None),
     files: List[UploadFile] = File(...), # Accept multiple files
