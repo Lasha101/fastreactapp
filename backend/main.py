@@ -6,10 +6,8 @@ from contextlib import asynccontextmanager
 import tempfile
 from fastapi import BackgroundTasks
 from pydantic import ValidationError
-# --> IMPORT Request
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Query, Form, Request, Response, Body
 from fastapi.middleware.cors import CORSMiddleware
-# --> IMPORT JSONResponse
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
@@ -18,30 +16,28 @@ from datetime import datetime, timezone
 import crud, models, schemas, auth
 from database import SessionLocal, engine, get_db
 from typing import Optional, List
-import ocr_service # Import the new service
+import ocr_service 
 from celery.result import AsyncResult
-# --> IMPORT the celery_app instance
 from celery_worker import celery_app, extract_document_data
-import logging # --> IMPORT logging
+import logging 
 
-# --> IMPORT everything needed from slowapi
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from dotenv import load_dotenv # You'll need to install this library
+from dotenv import load_dotenv
 
 
 # Load environment variables from a .env file (for local development)
 load_dotenv()
 
-# --> CONFIGURE logging
+# CONFIGURE logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Create all database tables
-models.Base.metadata.create_all(bind=engine)
+# Create all database tables, checking first to prevent errors on restart
+models.Base.metadata.create_all(bind=engine, checkfirst=True)
 
-# --> INITIALIZE the limiter to identify users by their IP address
+# INITIALIZE the limiter to identify users by their IP address
 limiter = Limiter(key_func=get_remote_address)
 
 # --- Lifespan Context Manager (Modern way for startup/shutdown events) ---
@@ -75,7 +71,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# --> SET the limiter on the app state and add the exception handler
+# SET the limiter on the app state and add the exception handler
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -94,9 +90,7 @@ app.add_middleware(
 
 # --- Authentication Routes ---
 @app.post("/token", response_model=schemas.Token)
-# --> APPLY the rate limit decorator. This allows 5 attempts per minute.
 @limiter.limit("5/minute")
-# --> ADD 'request: Request' to the function signature
 def login_for_access_token(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = auth.authenticate_user(db, form_data.username, form_data.password)
     if not user:
@@ -179,8 +173,6 @@ def update_user(user_id: int, user_update: schemas.UserUpdate, db: Session = Dep
 
 @app.post("/admin/users/", response_model=schemas.User, dependencies=[Depends(auth.require_admin)])
 def create_user_by_admin(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    # This endpoint is protected and can only be accessed by an admin.
-    # It does not require an invitation token.
     db_user_by_email = crud.get_user_by_email(db, email=user.email)
     if db_user_by_email:
         raise HTTPException(status_code=400, detail="Email déjà enregistré")
@@ -189,7 +181,6 @@ def create_user_by_admin(user: schemas.UserCreate, db: Session = Depends(get_db)
     if db_user_by_username:
         raise HTTPException(status_code=400, detail="Nom d'utilisateur déjà enregistré")
 
-    # The 'role' can be passed in the user object if you want admins to create other admins
     return crud.create_user(db=db, user=user, role=user.role if hasattr(user, 'role') else 'user')
 
 # --- Passport Routes ---
@@ -197,35 +188,23 @@ def create_user_by_admin(user: schemas.UserCreate, db: Session = Depends(get_db)
 def create_passport(passport: schemas.PassportCreate, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_active_user)):
     return crud.create_user_passport(db=db, passport=passport, user_id=current_user.id)
 
-
-# --- NEW: Passport OCR Upload Endpoint (Asynchronous) ---
 @app.post("/passports/upload-and-extract/", response_model=schemas.MultiAsyncTaskResponse, status_code=status.HTTP_202_ACCEPTED)
 async def upload_and_extract_passport_async(
     destination: Optional[str] = Form(None),
-    files: List[UploadFile] = File(...), # Accept multiple files
+    files: List[UploadFile] = File(...),
     current_user: models.User = Depends(auth.get_current_active_user)
 ):
-    """
-    Accepts one or more files, saves them temporarily, and starts background OCR tasks.
-    Responds immediately with a list of task IDs for the client to poll.
-    """
     task_ids = []
     for file in files:
-        # Save the uploaded file to a temporary location on disk.
-        # The background task will be responsible for deleting this file.
         try:
-            # Create a unique temporary file to avoid name collisions
             with tempfile.NamedTemporaryFile(delete=False, suffix=f"-{file.filename}") as temp_file:
                 content = await file.read()
                 temp_file.write(content)
                 temp_file_path = temp_file.name
         except Exception as e:
-            # If one file fails to save, we might want to stop or continue.
-            # For now, we'll log it and continue with others.
             logger.error(f"Could not save uploaded file to disk: {file.filename}. Error: {e}")
-            continue # Skip to the next file
+            continue
 
-        # Dispatch the background task via Celery
         task = extract_document_data.delay(
             file_path=temp_file_path,
             original_filename=file.filename,
@@ -240,13 +219,8 @@ async def upload_and_extract_passport_async(
 
     return JSONResponse(content={"tasks": task_ids}, status_code=status.HTTP_202_ACCEPTED)
 
-
-# --- NEW: Task Status and Cancellation Endpoints ---
 @app.get("/tasks/{task_id}/status", response_model=schemas.AsyncTaskStatus)
 def get_task_status(task_id: str):
-    """
-    Endpoint for the frontend to poll for the status of a background task.
-    """
     task_result = AsyncResult(task_id, app=celery_app)
     
     response_data = {
@@ -259,10 +233,8 @@ def get_task_status(task_id: str):
     if task_result.status == 'SUCCESS':
         response_data["result"] = task_result.result
     elif task_result.status == 'FAILURE':
-        # Celery stores the exception instance in .info
         response_data["result"] = str(task_result.info)
     elif task_result.status == 'PROGRESS':
-        # Custom progress metadata is in .info
         response_data["progress"] = task_result.info if isinstance(task_result.info, dict) else {"status": str(task_result.info)}
     elif task_result.status == 'REVOKED':
         response_data['status'] = 'CANCELLED'
@@ -272,17 +244,10 @@ def get_task_status(task_id: str):
 
 @app.post("/tasks/{task_id}/cancel", status_code=status.HTTP_202_ACCEPTED)
 def cancel_task(task_id: str):
-    """
-    Endpoint for the frontend to request cancellation of a background task.
-    """
     logger.info(f"Received request to cancel task: {task_id}")
-    # Revoke the task, setting terminate to True to send a SIGTERM signal to the worker process
     celery_app.control.revoke(task_id, terminate=True, signal='SIGTERM')
     return JSONResponse(content={"message": "Cancellation request sent."}, status_code=202)
 
-
-
-# /export/data endpoint
 @app.get("/export/data")
 def export_data(
     destination: Optional[str] = None,
@@ -294,7 +259,6 @@ def export_data(
 ):
     effective_user_id = current_user.id
     if current_user.role == "admin":
-        # If admin provides a user_id, use it. Otherwise, it will be None (all users).
         effective_user_id = user_id
     
     filtered_data = crud.filter_data(db, destination, effective_user_id, first_name, last_name)
@@ -357,20 +321,12 @@ def delete_passport(passport_id: int, db: Session = Depends(get_db), current_use
         raise HTTPException(status_code=403, detail="Non autorisé à supprimer ce passeport")
     return crud.delete_passport(db=db, passport_id=passport_id)
 
-
-
-
 @app.post("/passports/delete-multiple", status_code=status.HTTP_204_NO_CONTENT, summary="Delete multiple passports")
 def delete_multiple_passports(
     payload: schemas.IdsList = Body(...),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_active_user)
 ):
-    """
-    Delete multiple passports by providing a list of their IDs in the request body.
-    - An **admin** can delete any passports.
-    - A **regular user** can only delete passports that belong to them.
-    """
     if not payload.ids:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -382,11 +338,6 @@ def delete_multiple_passports(
     )
     
     return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-
-
-
 
 # --- Voyage Routes ---
 @app.post("/voyages/", response_model=schemas.Voyage)
@@ -421,7 +372,6 @@ def delete_voyage(voyage_id: int, db: Session = Depends(get_db), current_user: m
         raise HTTPException(status_code=403, detail="Non autorisé à supprimer ce voyage")
     return crud.delete_voyage(db=db, voyage_id=voyage_id)
 
-
 @app.get("/destinations/", response_model=List[str])
 def get_unique_destinations(
     user_id: Optional[int] = Query(None),
@@ -434,7 +384,6 @@ def get_unique_destinations(
     
     return crud.get_destinations_by_user_id(db, user_id=target_user_id)
 
-
 # --- File Upload Route ---
 UPLOAD_DIR = "uploads"
 if not os.path.exists(UPLOAD_DIR):
@@ -446,7 +395,6 @@ async def create_upload_file(file: UploadFile = File(...), current_user: models.
     with open(file_location, "wb+") as file_object:
         file_object.write(file.file.read())
     return {"info": f"fichier '{file.filename}' sauvegardé à '{file_location}'"}
-
 
 @app.get("/invitations/{token}", response_model=schemas.Invitation)
 def get_invitation(token: str, db: Session = Depends(get_db)):
@@ -468,7 +416,6 @@ def create_invitation(invitation: schemas.InvitationCreate, db: Session = Depend
     
     return crud.create_invitation(db=db, email=invitation.email)
 
-
 @app.get("/admin/invitations/", response_model=list[schemas.Invitation], dependencies=[Depends(auth.require_admin)])
 def read_invitations(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     invitations = crud.get_invitations(db, skip=skip, limit=limit)
@@ -487,7 +434,6 @@ def delete_invitation(invitation_id: int, db: Session = Depends(get_db)):
     if db_invitation is None:
         raise HTTPException(status_code=404, detail="Invitation non trouvée")
     return db_invitation
-
 
 @app.get("/admin/filterable-users", response_model=list[schemas.User], dependencies=[Depends(auth.require_admin)])
 def read_filterable_users(db: Session = Depends(get_db)):

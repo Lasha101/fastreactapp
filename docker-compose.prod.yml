@@ -12,6 +12,7 @@ services:
     image: gurshabo55/fastreact-backend:latest
     volumes:
       - ./google-credentials.json:/app/google-credentials.json:ro
+      - ./data:/app/data
     env_file:
       - ./.env.prod
     depends_on:
