@@ -26,7 +26,6 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from dotenv import load_dotenv
 
-
 # Load environment variables from a .env file (for local development)
 load_dotenv()
 
@@ -34,40 +33,18 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Create all database tables, checking first to prevent errors on restart
-models.Base.metadata.create_all(bind=engine, checkfirst=True)
+# NOTE: The database creation logic has been moved to initial_db.py
+# and is run by the prestart.sh script to avoid race conditions.
 
 # INITIALIZE the limiter to identify users by their IP address
 limiter = Limiter(key_func=get_remote_address)
 
-# --- Lifespan Context Manager (Modern way for startup/shutdown events) ---
+# Lifespan manager is now simpler or can be removed if not used for other startup/shutdown tasks
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Code to run on startup
-    db = SessionLocal()
-    # Check if admin user exists and create one if not
-    admin_user = crud.get_user_by_username(db, username="admin")
-    if not admin_user:
-        # Get the admin password from an environment variable
-        ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
-        if not ADMIN_PASSWORD:
-            # Handle the case where the password isn't set, maybe log a warning
-            print("WARNING: ADMIN_PASSWORD environment variable not set. Admin user not created.")
-        else:
-            admin = schemas.UserCreate(
-                first_name="Admin",
-                last_name="User",
-                email="admin@example.com",
-                phone_number="1234567890",
-                user_name="admin",
-                password=ADMIN_PASSWORD # Use the variable here
-            )
-            # Admin is created without an invitation token
-            crud.create_user(db=db, user=admin, role="admin", token=None)
-    db.close()
+    # You can add other startup logic here if needed
     yield
-    # Code to run on shutdown (if any)
-
+    # You can add shutdown logic here if needed
 
 app = FastAPI(lifespan=lifespan)
 
@@ -101,6 +78,11 @@ def login_for_access_token(request: Request, form_data: OAuth2PasswordRequestFor
         )
     access_token = auth.create_access_token(data={"sub": user.user_name})
     return {"access_token": access_token, "token_type": "bearer"}
+
+# --- (The rest of your main.py file remains exactly the same) ---
+# ...
+# (Just copy the rest of your endpoints here as they were)
+# ...
 
 # --- User Routes ---
 @app.post("/users/", response_model=schemas.User)

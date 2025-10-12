@@ -13,6 +13,8 @@ specific_files_to_merge = [
     'backend/models.py',
     'backend/database.py',
     'backend/auth.py',
+    'backend/prestart.sh',
+    'backend/initial_db.py',
     'backend/ocr_service.py',
     'backend/celery_worker.py',
     '.github/workflows/deploy.yml',
