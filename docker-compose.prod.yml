@@ -1,5 +1,9 @@
+# docker-compose.prod.yml
+
+version: '3.8'
+
 services:
-  # --- NGINX (Frontend Service) ---
+  # --- NGINX (Frontend & Reverse Proxy) ---
   nginx:
     image: gurshabo55/fastreact-frontend:latest
     ports:
@@ -11,14 +15,16 @@ services:
   backend:
     image: gurshabo55/fastreact-backend:latest
     volumes:
+      # Mount the credentials file into the container (read-only)
       - ./google-credentials.json:/app/google-credentials.json:ro
-      - ./data:/app/data
+      # Mount a volume for the SQLite database to persist data
+      - app_data:/app/data
     env_file:
       - ./.env.prod
     depends_on:
       - redis
 
-  # --- REDIS (Message Broker) ---
+  # --- REDIS (Message Broker & Celery Backend) ---
   redis:
     image: "redis:7-alpine"
 
@@ -27,9 +33,13 @@ services:
     image: gurshabo55/fastreact-backend:latest
     command: ["celery", "-A", "celery_worker.celery_app", "worker", "--loglevel=info"]
     volumes:
+      # Mount the credentials file into the container (read-only)
       - ./google-credentials.json:/app/google-credentials.json:ro
     env_file:
       - ./.env.prod
     depends_on:
       - redis
       - backend
+
+volumes:
+  app_data: # Define the named volume for persistence

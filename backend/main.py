@@ -179,22 +179,22 @@ async def upload_and_extract_passport_async(
     task_ids = []
     for file in files:
         try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=f"-{file.filename}") as temp_file:
-                content = await file.read()
-                temp_file.write(content)
-                temp_file_path = temp_file.name
-        except Exception as e:
-            logger.error(f"Could not save uploaded file to disk: {file.filename}. Error: {e}")
-            continue
+            # Read file content into memory instead of saving to a temp file
+            content = await file.read()
+            
+            # Pass the raw content to the Celery worker
+            task = extract_document_data.delay(
+                file_content=content,
+                original_filename=file.filename,
+                content_type=file.content_type,
+                destination=destination,
+                user_id=current_user.id
+            )
+            task_ids.append({"task_id": task.id, "filename": file.filename})
 
-        task = extract_document_data.delay(
-            file_path=temp_file_path,
-            original_filename=file.filename,
-            content_type=file.content_type,
-            destination=destination,
-            user_id=current_user.id
-        )
-        task_ids.append({"task_id": task.id, "filename": file.filename})
+        except Exception as e:
+            logger.error(f"Could not read uploaded file: {file.filename}. Error: {e}")
+            continue
 
     if not task_ids:
         raise HTTPException(status_code=500, detail="No files could be processed.")

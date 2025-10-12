@@ -3,6 +3,7 @@
 import os
 import time
 from typing import Optional
+import tempfile
 
 import ocr_service
 import crud
@@ -22,10 +23,10 @@ celery_app = Celery(
     backend=CELERY_RESULT_BACKEND
 )
 celery_app.conf.update(
-    accept_content=['json'],
-    task_serializer='json',
+    accept_content=['json', 'pickle'], # Add pickle to handle bytes
+    task_serializer='pickle',
     result_serializer='json',
-    task_track_started=True, 
+    task_track_started=True,
 )
 
 logger = get_task_logger(__name__)
@@ -48,14 +49,20 @@ def on_task_revoked(request, terminated, signum, expired, **kwargs):
 
 
 @celery_app.task(bind=True, name='tasks.extract_document_data')
-def extract_document_data(self, file_path: str, original_filename: str, content_type: str, destination: Optional[str], user_id: int):
+def extract_document_data(self, file_content: bytes, original_filename: str, content_type: str, destination: Optional[str], user_id: int):
     """
     Celery task to perform OCR, parse results, and save them to the database.
     """
     gcs_source_uri = None
     google_operation_name = None
+    file_path = None
 
     try:
+        # Create a temporary file inside the worker container to store the content
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f"-{original_filename}") as temp_file:
+            temp_file.write(file_content)
+            file_path = temp_file.name
+
         self.update_state(state='PROGRESS', meta={'status': 'Uploading to cloud...'})
         google_operation_name, gcs_source_uri = ocr_service.start_async_ocr_extraction(file_path, content_type)
 
@@ -117,6 +124,6 @@ def extract_document_data(self, file_path: str, original_filename: str, content_
              ocr_service.cancel_google_ocr_operation(google_operation_name)
         if gcs_source_uri:
             ocr_service._delete_from_gcs(gcs_source_uri)
-        if os.path.exists(file_path):
+        if file_path and os.path.exists(file_path):
             os.remove(file_path)
             logger.info(f"Cleaned up temporary file: {file_path}")
