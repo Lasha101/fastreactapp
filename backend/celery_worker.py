@@ -36,8 +36,7 @@ def on_task_revoked(request, terminated, signum, expired, **kwargs):
     """
     Handler to clean up resources when a task is revoked.
     """
-    # The task's state is stored in its request context
-    info = request.properties.get('root_id') # A way to access state, but can be complex
+    info = request.properties.get('root_id') 
     logger.warning(f"Task {request.id} revoked. Manual cleanup may be required if resources are not in task state.")
     # More robust cleanup is handled in the task's finally block.
 
@@ -60,7 +59,8 @@ def extract_document_data(self, file_path: str, original_filename: str, content_
         
         # 2. Poll for the result from Google
         while True:
-            if self.is_revoked():
+            # --- MODIFICATION 1 ---
+            if self.request.is_revoked():
                 logger.warning(f"Task {self.request.id} is revoked. Cancelling Google operation.")
                 # The 'finally' block will handle the cleanup
                 return {'status': 'CANCELLED', 'detail': 'Task was cancelled by user.'}
@@ -110,16 +110,14 @@ def extract_document_data(self, file_path: str, original_filename: str, content_
 
     except Exception as e:
         logger.error(f"Error in Celery task {self.request.id}: {e}", exc_info=True)
-        # 🔻🔻🔻 THE FIX IS HERE 🔻🔻🔻
-        # The line below was causing the error and has been removed.
-        # self.update_state(state='FAILURE', meta={'status': str(e)})
         # Re-raise the exception to ensure Celery records it as a failure correctly.
         raise e
     finally:
         # 4. Cleanup all resources
         logger.info(f"Cleaning up resources for task {self.request.id}.")
         # Cancel the Google operation if it's still running
-        if self.is_revoked() and google_operation_name:
+        # --- MODIFICATION 2 ---
+        if self.request.is_revoked() and google_operation_name:
              ocr_service.cancel_google_ocr_operation(google_operation_name)
         # Delete the uploaded file from GCS
         if gcs_source_uri:
