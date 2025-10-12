@@ -110,9 +110,10 @@ def extract_document_data(self, file_path: str, original_filename: str, content_
 
     except Exception as e:
         logger.error(f"Error in Celery task {self.request.id}: {e}", exc_info=True)
-        # This will mark the task as FAILED and store the exception
-        self.update_state(state='FAILURE', meta={'status': str(e)})
-        # Re-raise the exception to ensure Celery records it as a failure
+        # 🔻🔻🔻 THE FIX IS HERE 🔻🔻🔻
+        # The line below was causing the error and has been removed.
+        # self.update_state(state='FAILURE', meta={'status': str(e)})
+        # Re-raise the exception to ensure Celery records it as a failure correctly.
         raise e
     finally:
         # 4. Cleanup all resources
