@@ -25,20 +25,26 @@ celery_app.conf.update(
     accept_content=['json'],
     task_serializer='json',
     result_serializer='json',
-    task_track_started=True, # Important for getting task state
+    task_track_started=True, 
 )
 
 logger = get_task_logger(__name__)
 
 
+# --- MODIFICATION START ---
 @task_revoked.connect
 def on_task_revoked(request, terminated, signum, expired, **kwargs):
     """
-    Handler to clean up resources when a task is revoked.
+    Handler to log when a task is revoked.
+    Cleanup is now handled entirely within the task's 'finally' block.
     """
-    info = request.properties.get('root_id') 
-    logger.warning(f"Task {request.id} revoked. Manual cleanup may be required if resources are not in task state.")
-    # More robust cleanup is handled in the task's finally block.
+    # The 'request' object here is a 'Request' class, not the task context.
+    # We can get the task ID directly from it.
+    logger.warning(
+        f"Task {request.id} was revoked. "
+        f"Terminated: {terminated}, Signal: {signum}, Expired: {expired}"
+    )
+# --- MODIFICATION END ---
 
 
 @celery_app.task(bind=True, name='tasks.extract_document_data')
@@ -50,19 +56,15 @@ def extract_document_data(self, file_path: str, original_filename: str, content_
     google_operation_name = None
 
     try:
-        # 1. Start the async job on Google Vision
         self.update_state(state='PROGRESS', meta={'status': 'Uploading to cloud...'})
         google_operation_name, gcs_source_uri = ocr_service.start_async_ocr_extraction(file_path, content_type)
 
         logger.info(f"Task {self.request.id} started Google operation {google_operation_name}")
         self.update_state(state='PROGRESS', meta={'status': 'Processing document...'})
         
-        # 2. Poll for the result from Google
         while True:
-            # --- MODIFICATION 1 ---
             if self.request.is_revoked():
-                logger.warning(f"Task {self.request.id} is revoked. Cancelling Google operation.")
-                # The 'finally' block will handle the cleanup
+                logger.warning(f"Task {self.request.id} is revoked during processing loop.")
                 return {'status': 'CANCELLED', 'detail': 'Task was cancelled by user.'}
 
             result = ocr_service.get_async_ocr_results(google_operation_name)
@@ -72,7 +74,6 @@ def extract_document_data(self, file_path: str, original_filename: str, content_
                 
                 self.update_state(state='PROGRESS', meta={'status': 'Saving results to database...'})
                 
-                # 3. Process results and save to DB
                 db = SessionLocal()
                 success_count = 0
                 failures = []
@@ -81,7 +82,7 @@ def extract_document_data(self, file_path: str, original_filename: str, content_
                         if page_result.get('status') == 'SUCCESS':
                             passport_data = schemas.PassportCreate(
                                 **page_result['data'],
-                                destination=destination # Apply the same destination to all passports in this file
+                                destination=destination 
                             )
                             crud.create_user_passport(db=db, passport=passport_data, user_id=user_id)
                             success_count += 1
@@ -105,24 +106,17 @@ def extract_document_data(self, file_path: str, original_filename: str, content_
                 logger.error(f"Google operation {google_operation_name} failed: {result.get('error')}")
                 raise Exception(f"Google Vision API Error: {result.get('error', 'Unknown error')}")
             
-            # If still processing, wait before polling again
             time.sleep(10)
 
     except Exception as e:
         logger.error(f"Error in Celery task {self.request.id}: {e}", exc_info=True)
-        # Re-raise the exception to ensure Celery records it as a failure correctly.
         raise e
     finally:
-        # 4. Cleanup all resources
         logger.info(f"Cleaning up resources for task {self.request.id}.")
-        # Cancel the Google operation if it's still running
-        # --- MODIFICATION 2 ---
         if self.request.is_revoked() and google_operation_name:
              ocr_service.cancel_google_ocr_operation(google_operation_name)
-        # Delete the uploaded file from GCS
         if gcs_source_uri:
             ocr_service._delete_from_gcs(gcs_source_uri)
-        # Delete the temporary local file
         if os.path.exists(file_path):
             os.remove(file_path)
             logger.info(f"Cleaned up temporary file: {file_path}")
