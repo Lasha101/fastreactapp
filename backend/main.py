@@ -39,12 +39,26 @@ logger = logging.getLogger(__name__)
 # INITIALIZE the limiter to identify users by their IP address
 limiter = Limiter(key_func=get_remote_address)
 
-# Lifespan manager is now simpler or can be removed if not used for other startup/shutdown tasks
+
+# --- MODIFICATION START ---
+# Define UPLOAD_DIR here so it's accessible globally
+UPLOAD_DIR = "uploads"
+
+# Lifespan manager to handle startup events like creating directories.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # You can add other startup logic here if needed
+    # This code runs once on startup.
+    logger.info("Application startup...")
+    # Create the upload directory if it doesn't exist.
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    logger.info(f"Ensured upload directory '{UPLOAD_DIR}' exists.")
+    
     yield
-    # You can add shutdown logic here if needed
+    
+    # This code runs once on shutdown.
+    logger.info("Application shutdown.")
+# --- MODIFICATION END ---
+
 
 app = FastAPI(lifespan=lifespan)
 
@@ -367,10 +381,7 @@ def get_unique_destinations(
     return crud.get_destinations_by_user_id(db, user_id=target_user_id)
 
 # --- File Upload Route ---
-UPLOAD_DIR = "uploads"
-if not os.path.exists(UPLOAD_DIR):
-    os.makedirs(UPLOAD_DIR)
-
+# The UPLOAD_DIR creation logic has been moved to the lifespan manager
 @app.post("/uploadfile/")
 async def create_upload_file(file: UploadFile = File(...), current_user: models.User = Depends(auth.get_current_active_user)):
     file_location = os.path.join(UPLOAD_DIR, f"{current_user.user_name}_{file.filename}")
