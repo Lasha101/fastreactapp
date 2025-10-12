@@ -48,7 +48,7 @@ jobs:
         key: ${{ secrets.DO_SSH_KEY }}
         script: |
           # Navigate to the project directory
-          # IMPORTANT: Change 'your-repo-name' to your repo's folder name
+          # IMPORTANT: Make sure 'fastreactapp' is your repo's folder name on the droplet
           cd fastreactapp
           
           # Update the repository code from GitHub
@@ -63,18 +63,19 @@ jobs:
           echo "CELERY_BROKER_URL=redis://redis:6379/0" >> .env.prod
           echo "CELERY_RESULT_BACKEND=redis://redis:6379/0" >> .env.prod
           
-          # 2. Decode the Base64 Google credentials and save to file
-          echo "${{ secrets.GCP_SA_KEY }}" | base64 -d > google-credentials.json
+          # 2. The step that overwrites google-credentials.json has been REMOVED.
+          # Your manually placed credentials file on the droplet will now be preserved.
           
           # --- Deploy with Docker Compose ---
           # Login to Docker Hub on the server
           echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
           
           # Pull the latest images from Docker Hub
-          docker-compose -f docker-compose.prod.yml pull
+          # NOTE: Ensure your compose file on the server is named 'docker-compose.yml' or change this command.
+          docker-compose -f docker-compose.yml pull
           
           # Restart the services with the new images in detached mode
-          docker-compose -f docker-compose.prod.yml up -d
+          docker-compose -f docker-compose.yml up -d
           
           # Clean up old, unused Docker images to save space
           docker image prune -f
