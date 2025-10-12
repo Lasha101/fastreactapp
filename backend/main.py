@@ -33,31 +33,27 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# NOTE: The database creation logic has been moved to initial_db.py
-# and is run by the prestart.sh script to avoid race conditions.
-
 # INITIALIZE the limiter to identify users by their IP address
 limiter = Limiter(key_func=get_remote_address)
 
 
-# --- MODIFICATION START ---
+# --- CORRECT STARTUP LOGIC ---
 # Define UPLOAD_DIR here so it's accessible globally
 UPLOAD_DIR = "uploads"
 
 # Lifespan manager to handle startup events like creating directories.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # This code runs once on startup.
+    # This code runs once on application startup.
     logger.info("Application startup...")
-    # Create the upload directory if it doesn't exist.
+    # Create the upload directory, but don't fail if it already exists.
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     logger.info(f"Ensured upload directory '{UPLOAD_DIR}' exists.")
     
     yield
     
-    # This code runs once on shutdown.
+    # This code runs on shutdown.
     logger.info("Application shutdown.")
-# --- MODIFICATION END ---
 
 
 app = FastAPI(lifespan=lifespan)
@@ -93,24 +89,16 @@ def login_for_access_token(request: Request, form_data: OAuth2PasswordRequestFor
     access_token = auth.create_access_token(data={"sub": user.user_name})
     return {"access_token": access_token, "token_type": "bearer"}
 
-# --- (The rest of your main.py file remains exactly the same) ---
-# ...
-# (Just copy the rest of your endpoints here as they were)
-# ...
-
 # --- User Routes ---
 @app.post("/users/", response_model=schemas.User)
 def register_user(user: schemas.UserCreate, token: str = Query(...), db: Session = Depends(get_db)):
-    # 1. Get and validate the invitation first.
     invitation = crud.get_invitation_by_token(db, token)
     if not invitation or invitation.is_used or invitation.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
         raise HTTPException(status_code=400, detail="Jeton d'inscription invalide ou expiré.")
 
-    # 2. Check if the email from the invitation matches the one in the form.
     if invitation.email != user.email:
         raise HTTPException(status_code=400, detail="L'email d'inscription ne correspond pas à l'email de l'invitation.")
 
-    # 3. Now, check for existing users.
     db_user_by_email = crud.get_user_by_email(db, email=user.email)
     if db_user_by_email:
         raise HTTPException(status_code=400, detail="Email déjà enregistré")
@@ -119,10 +107,8 @@ def register_user(user: schemas.UserCreate, token: str = Query(...), db: Session
     if db_user_by_username:
         raise HTTPException(status_code=400, detail="Nom d'utilisateur déjà enregistré")
 
-    # 4. Create the user.
     created_user = crud.create_user(db=db, user=user, role="user")
     
-    # 5. Delete the invitation now that the user is created.
     db.delete(invitation)
     db.commit()
 
@@ -381,7 +367,6 @@ def get_unique_destinations(
     return crud.get_destinations_by_user_id(db, user_id=target_user_id)
 
 # --- File Upload Route ---
-# The UPLOAD_DIR creation logic has been moved to the lifespan manager
 @app.post("/uploadfile/")
 async def create_upload_file(file: UploadFile = File(...), current_user: models.User = Depends(auth.get_current_active_user)):
     file_location = os.path.join(UPLOAD_DIR, f"{current_user.user_name}_{file.filename}")
