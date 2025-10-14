@@ -1,5 +1,5 @@
 # backend/main.py
-
+import base64
 import os
 import pandas as pd
 from contextlib import asynccontextmanager
@@ -181,10 +181,10 @@ async def upload_and_extract_passport_async(
         try:
             # Read file content into memory instead of saving to a temp file
             content = await file.read()
-            
+            encoded_content = base64.b64encode(content).decode('utf-8')
             # Pass the raw content to the Celery worker
             task = extract_document_data.delay(
-                file_content=content,
+                file_content=encoded_content,
                 original_filename=file.filename,
                 content_type=file.content_type,
                 destination=destination,

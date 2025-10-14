@@ -17,12 +17,12 @@ specific_files_to_merge = [
     'backend/initial_db.py',
     'backend/ocr_service.py',
     'backend/celery_worker.py',
-    '.github/workflows/deploy.yml',
-    'backend/Dockerfile',
+    # '.github/workflows/deploy.yml',
+    # 'backend/Dockerfile',
     'frontend/src/App.jsx',
-    'frontend/Dockerfile',
-    'frontend/nginx.conf',
-    'docker-compose.yml',
+    # 'frontend/Dockerfile',
+    # 'frontend/nginx.conf',
+    # 'docker-compose.yml',
 ]
 
 # 2. Choose a name for the final, combined file.
