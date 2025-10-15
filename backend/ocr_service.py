@@ -3,7 +3,7 @@
 import re
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from google.cloud import vision, storage
 from google.api_core import exceptions
 from fastapi import HTTPException
@@ -87,7 +87,7 @@ def start_async_ocr_extraction(file_path: str, content_type: str) -> Tuple[str, 
     if not content_type == "application/pdf":
         raise HTTPException(status_code=400, detail="Only multi-page PDF files are supported for batch processing.")
 
-    timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+    timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     unique_filename = f"uploads/{timestamp}-{os.path.basename(file_path)}"
 
     # 1. Upload to GCS
@@ -145,32 +145,38 @@ def get_async_ocr_results(operation_name: str) -> dict:
     except Exception as e:
         logger.warning(f"Could not extract destination from metadata: {e}")
     
+    # --- CHANGE START ---
+    # This block is updated to correctly find the prefix for ALL result files.
     if not gcs_destination_uri:
         logger.info("Using fallback method to determine GCS destination")
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
-        prefix = "results/uploads/"
-        blobs = list(bucket.list_blobs(prefix=prefix))
+        prefix_to_search = "results/uploads/"
+        blobs = list(bucket.list_blobs(prefix=prefix_to_search))
         if not blobs:
             logger.error("No result blobs found in GCS")
             return {"status": "FAILURE", "error": "No OCR results found in storage"}
         
         blobs.sort(key=lambda x: x.time_created, reverse=True)
-        
         most_recent_blob = blobs[0]
         blob_name = most_recent_blob.name
-        import re
-        match = re.match(r'(results/uploads/\d+-[^/]+)-', blob_name)
-        if match:
-            prefix = match.group(1) + '-'
-        else:
+        
+        # This new logic reliably finds the correct common prefix for all result files
+        # by splitting on the 'output-' part of the filename.
+        if 'output-' in blob_name:
             prefix = blob_name.rsplit('output-', 1)[0]
+        else:
+            # This is a safety net in case a result file doesn't match the expected pattern.
+            logger.warning(f"Could not determine a common prefix from blob name: {blob_name}")
+            prefix = blob_name
     else:
         prefix = gcs_destination_uri.replace(f"gs://{GCS_BUCKET_NAME}/", "")
     
     logger.info(f"[GCS] Listing result blobs with prefix: '{prefix}'")
+    # --- CHANGE END ---
+    
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
     blob_list = list(bucket.list_blobs(prefix=prefix))
-    logger.info(f"[GCS] Found {len(blob_list)} result blob(s).")
+    logger.info(f"[GCS] Found {len(blob_list)} result blob(s) for this document.")
 
     results = []
     for blob in blob_list:
@@ -258,8 +264,6 @@ def _parse_date(date_str: Optional[str]) -> Optional[str]:
         logger.warning(f"Could not parse date string: {date_str}")
         return None
 
-# --- CHANGE START ---
-# This entire function has been replaced with a more robust version.
 def _parse_passport_text(raw_text: str) -> Dict[str, Optional[str]]:
     """
     Parses raw OCR text from a passport to extract structured data.
@@ -332,7 +336,6 @@ def _parse_passport_text(raw_text: str) -> Dict[str, Optional[str]]:
     for idx, line in enumerate(raw_text_lines):
         line_lower = line.lower()
         if not data["last_name"] and ('nom' in line_lower or 'surname' in line_lower):
-            # Try to extract from the same line by stripping keywords and delimiters
             value = re.sub(r'(nom|surname|/|\s|:)*', '', line, flags=re.IGNORECASE)
             if len(value) > 1: data["last_name"] = value.strip()
         
@@ -365,4 +368,3 @@ def _parse_passport_text(raw_text: str) -> Dict[str, Optional[str]]:
         )
         
     return data
-# --- CHANGE END ---

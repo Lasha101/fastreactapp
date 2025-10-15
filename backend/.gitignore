@@ -6,7 +6,6 @@ venv/
 *.pyc
 google-credentials.json
 google-credentials_for_ocr.json
-
 travel_app.db
 alembic.ini
 .env
